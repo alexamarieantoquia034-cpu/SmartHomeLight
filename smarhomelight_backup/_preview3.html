@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>preview</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">&#128161;</span>
+    SmartHome Light
+  </div>
+  <button class="nav-toggle" type="button" aria-label="Toggle navigation">&#9776;</button>
+  <nav class="nav">
+    <a class="active" href="#"><span class="ico">&#127968;</span>Dashboard</a>
+    <a href="#"><span class="ico">&#128241;</span>Devices</a>
+    <a href="#"><span class="ico">&#9200;</span>Schedules</a>
+    <a href="#"><span class="ico">&#128202;</span>History</a>
+  </nav>
+  <div class="userbox">
+    <div class="avatar">A</div>
+    <div class="who"><b>Administrator</b><span>Administrator</span></div>
+    <a class="btn btn-ghost" href="#">Logout</a>
+  </div>
+</header>
+<main class="wrap">
+  <div class="page-head">
+    <div>
+      <h1>Good evening, Administrator</h1>
+      <p class="sub">Here's what's happening with your lights right now.</p>
+    </div>
+    <div class="actions">
+      <div class="pill pill-warn" id="connStatus">0 / 1 device online</div>
+      <button class="btn" type="button">All off</button>
+      <button class="btn btn-primary" type="button">All on</button>
+    </div>
+  </div>
+  <section class="stats">
+    <div class="stat stat-warn"><span class="stat-ico">&#128161;</span><span class="stat-body"><span class="stat-label">Lights on</span><span class="stat-value"><span id="statOn">0</span><small>/ 1</small></span></span></div>
+    <div class="stat stat-blue"><span class="stat-ico">&#9889;</span><span class="stat-body"><span class="stat-label">Power now</span><span class="stat-value"><span id="statWatts">0.0</span><small>W</small></span></span></div>
+    <div class="stat stat-ok"><span class="stat-ico">&#128200;</span><span class="stat-body"><span class="stat-label">Energy today</span><span class="stat-value"><span id="statWh">10.20</span><small>Wh</small></span></span></div>
+    <div class="stat"><span class="stat-ico">&#128176;</span><span class="stat-body"><span class="stat-label">Est. cost / day</span><span class="stat-value">0.00<small>IDR</small></span></span></div>
+  </section>
+  <section class="grid">
+    <article class="card light-card is-offline" data-device="1" style="--wash:transparent">
+      <header class="light-head">
+        <div class="light-id"><div><h2>Living Room Light</h2><span class="room">Living Room</span></div></div>
+        <span class="status-dot off" title="Offline"></span>
+      </header>
+      <div class="bulb-stage">
+        <div class="bulb" style="background:rgba(120,130,150,.10);box-shadow:none"><span class="bulb-icon">&#127769;</span></div>
+      </div>
+      <div class="light-meta"><span data-role="state">OFF</span><span class="dot">&bull;</span><span data-role="brightness">100%</span><span class="dot">&bull;</span><span data-role="power">0.0 W</span></div>
+      <div class="sync-note wait" data-role="sync">device offline &middot; changes will queue</div>
+      <div class="power-row">
+        <button class="btn btn-power is-queued" type="button" data-action="toggle">Turn on</button>
+        <button class="btn btn-test" type="button" data-action="test">&#128267;</button>
+      </div>
+      <label class="field slider-field"><span>Brightness <b data-role="brightness-label">100%</b></span>
+        <input type="range" min="0" max="100" value="100" style="--pct:100%" data-action="brightness">
+      </label>
+      <div class="color-row"><span class="field-label">Colour</span><input type="color" value="#ffd6af" data-action="color"><span class="color-hex" data-role="hex">#FFD6AF</span></div>
+      <div class="swatch-label">Presets</div>
+      <div class="swatches">
+        <button class="swatch" style="background:#ffd6af" data-hex="#ffd6af"></button>
+        <button class="swatch" style="background:#ffffff" data-hex="#ffffff"></button>
+        <button class="swatch" style="background:#ff4d4d" data-hex="#ff4d4d"></button>
+        <button class="swatch" style="background:#4dff88" data-hex="#4dff88"></button>
+        <button class="swatch" style="background:#4d8cff" data-hex="#4d8cff"></button>
+        <button class="swatch" style="background:#b44dff" data-hex="#b44dff"></button>
+        <button class="swatch" style="background:#4dffff" data-hex="#4dffff"></button>
+        <button class="swatch" style="background:#ff9f43" data-hex="#ff9f43"></button>
+        <button class="swatch" style="background:#ff00ff" data-hex="#ff00ff"></button>
+      </div>
+      <footer class="light-foot"><span title="Signal">&#128246; 0 dBm</span><span title="IP">&#127760; no ip</span><span title="Last seen">2 h ago</span></footer>
+    </article>
+    <article class="card light-card is-on" data-device="2" style="--wash:rgba(255,214,175,.16)">
+      <header class="light-head">
+        <div class="light-id"><div><h2>Bedroom Light</h2><span class="room">Bedroom</span></div></div>
+        <span class="status-dot on" title="Online"></span>
+      </header>
+      <div class="bulb-stage"><div class="bulb" style="background:rgba(255,214,175,1);box-shadow:0 0 46px rgba(255,214,175,.55), inset 0 0 26px rgba(255,214,175,.35)"><span class="bulb-icon">&#128161;</span></div></div>
+      <div class="light-meta"><span>ON</span><span class="dot">&bull;</span><span>80%</span><span class="dot">&bull;</span><span>7.2 W</span></div>
+      <div class="sync-note ok">&#10004; LED matches the setting</div>
+      <div class="power-row">
+        <button class="btn btn-power on">Turn off</button>
+        <button class="btn btn-test">&#128267;</button>
+      </div>
+      <label class="field slider-field"><span>Brightness <b>80%</b></span><input type="range" min="0" max="100" value="80" style="--pct:80%"></label>
+      <div class="color-row"><span class="field-label">Colour</span><input type="color" value="#ffd6af"><span class="color-hex">#FFD6AF</span></div>
+      <div class="swatch-label">Presets</div>
+      <div class="swatches"><button class="swatch" style="background:#ffd6af"></button><button class="swatch" style="background:#ffffff"></button><button class="swatch" style="background:#ff4d4d"></button><button class="swatch" style="background:#4dff88"></button><button class="swatch" style="background:#4d8cff"></button><button class="swatch" style="background:#b44dff"></button><button class="swatch" style="background:#4dffff"></button><button class="swatch" style="background:#ff9f43"></button><button class="swatch" style="background:#ff00ff"></button></div>
+      <footer class="light-foot"><span>&#128246; -55 dBm</span><span>&#127760; 192.168.1.50</span><span>just now</span></footer>
+    </article>
+    <article class="card light-card" data-device="3" style="--wash:transparent">
+      <header class="light-head">
+        <div class="light-id"><div><h2>Kitchen Light</h2><span class="room">Kitchen</span></div></div>
+        <span class="status-dot off" title="Offline"></span>
+      </header>
+      <div class="bulb-stage"><div class="bulb" style="background:rgba(120,130,150,.10);box-shadow:none"><span class="bulb-icon">&#127769;</span></div></div>
+      <div class="light-meta"><span>OFF</span><span class="dot">&bull;</span><span>60%</span><span class="dot">&bull;</span><span>0.0 W</span></div>
+      <div class="sync-note wait">device offline &middot; changes will queue</div>
+      <div class="power-row">
+        <button class="btn btn-power is-queued">Turn on</button>
+        <button class="btn btn-test">&#128267;</button>
+      </div>
+      <label class="field slider-field"><span>Brightness <b>60%</b></span><input type="range" min="0" max="100" value="60" style="--pct:60%"></label>
+      <div class="color-row"><span class="field-label">Colour</span><input type="color" value="#ffffff"><span class="color-hex">#FFFFFF</span></div>
+      <div class="swatch-label">Presets</div>
+      <div class="swatches"><button class="swatch" style="background:#ffd6af"></button><button class="swatch" style="background:#ffffff"></button><button class="swatch" style="background:#ff4d4d"></button><button class="swatch" style="background:#4dff88"></button><button class="swatch" style="background:#4d8cff"></button><button class="swatch" style="background:#b44dff"></button><button class="swatch" style="background:#4dffff"></button><button class="swatch" style="background:#ff9f43"></button><button class="swatch" style="background:#ff00ff"></button></div>
+      <footer class="light-foot"><span>&#128246; 0 dBm</span><span>&#127760; no ip</span><span>1 d ago</span></footer>
+    </article>
+  </section>
+</main>
+</body>
+</html>
