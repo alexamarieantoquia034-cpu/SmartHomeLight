@@ -52,6 +52,25 @@ $stmt->execute(array_merge([
     substr((string)($_GET['ip'] ?? ''), 0, 45),
 ], $ldrParams, [$deviceId]));
 
+// ---- 1b. Due schedules are executed HERE, server-side, on every poll ------
+// This is what makes schedules browser-independent: the ESP32 polls every
+// ~5 s even when nobody has a dashboard open, so a due schedule fires within
+// seconds of its time. cron/run_schedules.php (Windows Task Scheduler) runs
+// the same helper as a second runner - the atomic last_run claim inside
+// run_due_schedules() guarantees no duplicate execution when both hit the
+// same minute or when the ESP32 reconnects and polls twice in a row.
+// Fires BEFORE commands are handed over, so a schedule that fires right now
+// is delivered to the device in this very response.
+run_due_schedules($deviceId);
+
+// Re-read the device so the op_mode / room_dark used below reflect any
+// schedule that just fired (it switches the device to 'schedule' mode).
+$device = get_device_by_key($key);
+if (!$device) {
+    json_response(['ok' => false, 'error' => 'Unknown device key'], 401);
+}
+$deviceId = (int)$device['id'];
+
 // ---- 2. The device reports its CURRENT state ---------------------
 // NOTE: this is deliberately NOT written to light_state. light_state holds
 // the DESIRED state (what the user asked for). If we stored the device's
@@ -89,8 +108,33 @@ $stmt = db()->prepare('SELECT * FROM light_state WHERE device_id = ?');
 $stmt->execute([$deviceId]);
 $state = $stmt->fetch() ?: [];
 
+$opMode = in_array($device['op_mode'] ?? 'auto', ['auto','manual','schedule'], true)
+    ? ($device['op_mode'] ?? 'auto') : 'auto';
+
+// ---- Manual ownership: PERSISTS until the user or a schedule changes it -----
+// Previously this endpoint flipped manual -> auto after 60 s, which meant the
+// LDR took the relay back and overrode the user's ON/OFF - that was the core
+// "manual mode doesn't work" bug. Manual now stays manual until:
+//   * the user clicks an Auto/Manual/Schedule button (light_action.php
+//     action=op_mode), or
+//   * a schedule fires (run_due_schedules() moves the device to 'schedule').
+// The LDR therefore never overrides a manual or scheduled state, no matter
+// how long the page is left open or how many times the ESP32 reconnects.
+// The mode change reaches the ESP32 on its very next poll (<= 5 s), which is
+// also what survives page refreshes and Wi-Fi dropouts: mode + desired state
+// both live in MySQL, and the firmware re-applies them after any reboot.
+
+// In Auto mode the LDR owns the relay: desired state follows the sensor,
+// not a possibly-stale light_state row. In Manual/Schedule the dashboard
+// desired state is authoritative.
+if ($opMode === 'auto') {
+    $isOnDesired = (int)(!empty($device['room_dark']) ? 1 : 0);
+} else {
+    $isOnDesired = (int)($state['is_on'] ?? 0);
+}
+
 $desired = [
-    'is_on'      => (int)($state['is_on'] ?? 0),
+    'is_on'      => $isOnDesired,
     'brightness' => (int)($state['brightness'] ?? 0),
     'color'      => [
         (int)($state['color_r'] ?? 255),
@@ -98,6 +142,8 @@ $desired = [
         (int)($state['color_b'] ?? 175),
     ],
     'mode'       => $state['mode'] ?? 'white',
+    // Operating mode (Auto/Manual/Schedule) - ESP follows this.
+    'op_mode'    => $opMode,
 ];
 
 json_response([
@@ -105,5 +151,7 @@ json_response([
     'server_time' => date('c'),
     'commands'    => $commands,
     'desired'     => $desired,
+    'op_mode'     => $desired['op_mode'],
     'poll_interval' => (int)setting('poll_interval', app_config('poll_interval')),
 ]);
+

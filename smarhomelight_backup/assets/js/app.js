@@ -66,16 +66,36 @@
     body.append('csrf', csrf());
     Object.entries(data || {}).forEach(function (e) { body.append(e[0], e[1]); });
 
-    var res = await fetch(api(path), { method: 'POST', body, credentials: 'same-origin' });
-    if (res.status === 401 || (res.redirected && res.url.indexOf('login') !== -1)) {
-      window.location.href = api('login.php');
-      throw new Error('Session expired');
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function () { controller.abort(); }, 30000);
+
+    try {
+      var res = await fetch(api(path), {
+        method: 'POST',
+        body,
+        credentials: 'same-origin',
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (res.status === 401 || (res.redirected && res.url.indexOf('login') !== -1)) {
+        window.location.href = api('login.php');
+        throw new Error('Session expired');
+      }
+      var json = await res.json().catch(function () {
+        return { ok: false, error: 'Bad response' };
+      });
+      if (!json.ok) throw new Error(json.error || 'Request failed');
+      return json;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        toast('Request timed out after 30 seconds', 'err');
+      } else {
+        toast(err.message, 'err');
+      }
+      throw err;
     }
-    var json = await res.json().catch(function () {
-      return { ok: false, error: 'Bad response' };
-    });
-    if (!json.ok) throw new Error(json.error || 'Request failed');
-    return json;
   }
 
   function sendColor(id, colorHex) {
@@ -119,7 +139,7 @@
           await post('api/light_action.php', { device_id: id, action: 'test' });
           toast(card.dataset.online === '0'
             ? 'Test blink queued \u2014 it will run when the light reconnects'
-            : 'Test blink sent \u2014 the LED should flash R / G / B / white');
+            : 'Test blink sent \u2014 the relay should flash a few times now');
         } catch (err) {
           toast(err.message, 'err');
         }
@@ -127,19 +147,55 @@
       });
     }
 
+    /* --- operating mode pills (Auto / Manual / Schedule) --- */
+    $$('.mode-pill', card).forEach(function (pill) {
+      pill.addEventListener('click', async function () {
+        var mode = pill.dataset.mode;
+        if (!mode) return;
+        $$('.mode-pill', card).forEach(function (p) { busy(p, true); });
+        try {
+          await post('api/light_action.php', {
+            device_id: id, action: 'op_mode', op_mode: mode
+          });
+          toast('Mode set to ' + pill.textContent.trim());
+          await refresh();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+        $$('.mode-pill', card).forEach(function (p) { busy(p, false); });
+      });
+    });
+
     /* --- power toggle --- */
     if (powerBtn) {
       powerBtn.addEventListener('click', async function () {
         var turningOff = card.classList.contains('is-on');
         var offline = card.dataset.online === '0';
         busy(powerBtn, true);
+        var syncEl = card.querySelector('[data-role="sync"]');
         try {
           await post('api/light_action.php', { device_id: id, action: 'toggle' });
-          await refresh();
-          toast(offline
-            ? (turningOff ? 'Saved \u2014 the LED will switch off when it reconnects'
-                          : 'Saved \u2014 the LED will switch on when it reconnects')
-            : (turningOff ? 'Light turned off' : 'Light turned on'));
+          if (syncEl) {
+            syncEl.textContent = 'command sent \u00b7 waiting for the LED\u2026';
+            syncEl.className = 'sync-note wait';
+          }
+          if (offline) {
+            await refresh();
+            toast(turningOff
+              ? 'Saved \u2014 the LED will switch off when it reconnects'
+              : 'Saved \u2014 the LED will switch on when it reconnects');
+          } else {
+            // Success only when the ESP32 ITSELF reports the new state.
+            var d = await waitForSync(id, 12000);
+            if (d && d.in_sync) {
+              toast(turningOff ? 'Light turned off \u2014 confirmed' : 'Light turned on \u2014 confirmed');
+            } else if (d && !d.online) {
+              toast('Device went offline \u2014 command queued for when it reconnects', 'err');
+            } else {
+              await refresh();
+              toast('Command sent, but the device has not confirmed yet \u2014 check the relay/power', 'err');
+            }
+          }
         } catch (err) {
           toast(err.message, 'err');
         }
@@ -255,7 +311,16 @@
       var el = card.querySelector('[data-role="' + role + '"]');
       if (el) el.textContent = text;
     };
-    setText('state', d.is_on ? 'ON' : 'OFF');
+
+    // STATE shows what the HARDWARE last reported (devices.actual_on, written
+    // by the ESP32 heartbeat), never the desired value. Only when the device
+    // has never reported do we fall back to the desired state.
+    var reported = !!d.reported_at;
+    var actualOn = reported ? !!d.actual_on : !!d.is_on;
+    var stateTxt = actualOn ? 'ON' : 'OFF';
+    if (!reported) stateTxt += ' \u00b7 no report yet';
+    else if (d.online && !d.in_sync) stateTxt += ' \u00b7 pending';
+    setText('state', stateTxt);
     setText('brightness', d.brightness + '%');
     setText('brightness-label', d.brightness + '%');
     setText('power', Number(d.watts).toFixed(1) + ' W');
@@ -269,16 +334,21 @@
     // Remember reachability so the click handlers can explain themselves.
     card.dataset.online = d.online ? '1' : '0';
 
+    // Operating mode pills: highlight the authoritative backend mode.
+    $$('.mode-pill', card).forEach(function (p) {
+      p.classList.toggle('active', p.dataset.mode === d.op_mode);
+    });
+
     var sync = card.querySelector('[data-role="sync"]');
     if (sync) {
       if (!d.online) {
         sync.textContent = 'device offline \u00b7 changes will queue';
         sync.className = 'sync-note wait';
       } else if (d.in_sync) {
-        sync.textContent = '\u2714 LED matches the setting';
+        sync.textContent = '\u2714 LED reports ' + (actualOn ? 'ON' : 'OFF') + ' \u00b7 matches the setting';
         sync.className = 'sync-note ok';
       } else {
-        sync.textContent = 'waiting for the LED to confirm…';
+        sync.textContent = 'LED reports ' + (actualOn ? 'ON' : 'OFF') + ' \u00b7 confirming\u2026';
         sync.className = 'sync-note wait';
       }
     }
@@ -324,13 +394,23 @@
     }
   }
 
-  async function refresh() {
-    if (!cards.length) return;
+  /* Fetch the live state, paint every card + headline stats, return the JSON.
+     Returns null on network hiccup / redirect (then the page navigates). */
+  async function fetchState() {
+    if (!cards.length) return null;
     try {
-      var res  = await fetch(api('api/get_state.php'), { credentials: 'same-origin' });
-      if (res.redirected) { window.location.href = api('login.php'); return; }
+      var controller = new AbortController();
+      var timeoutId = setTimeout(function () { controller.abort(); }, 30000);
+
+      var res  = await fetch(api('api/get_state.php'), {
+        credentials: 'same-origin',
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (res.redirected) { window.location.href = api('login.php'); return null; }
       var json = await res.json();
-      if (!json.ok) return;
+      if (!json.ok) return null;
 
       json.devices.forEach(function (d) {
         var card = document.querySelector('.light-card[data-device="' + d.id + '"]');
@@ -348,7 +428,191 @@
         pill.classList.toggle('pill-ok', s.online > 0);
         pill.classList.toggle('pill-warn', s.online === 0);
       }
-    } catch (e) { /* keep last known state */ }
+      return json;
+    } catch (e) {
+      // keep last known state; the timeout abort is expected when connection stalls
+      return null;
+    }
+  }
+
+  async function refresh() {
+    await fetchState();
+  }
+
+  /* Wait until the HARDWARE itself reports the state we asked for
+     (devices.in_sync - actual_on vs desired, updated by the ESP32's own
+     heartbeat after it applied the command) or until the device drops
+     offline / time runs out. This is what makes the success toast truthful:
+     it fires only when the relay really changed, otherwise we report
+     "not confirmed" instead of a fake success. */
+  async function waitForSync(id, timeoutMs) {
+    var deadline = Date.now() + (timeoutMs || 12000);
+    var d = null;
+    while (Date.now() < deadline) {
+      var json = await fetchState();
+      if (json) {
+        d = null;
+        json.devices.forEach(function (x) { if (String(x.id) === String(id)) d = x; });
+        if (!d) return null;
+        if (d.in_sync) return d;                 // device confirmed the state
+        if (!d.online) return d;                 // dropped off - command queued
+      }
+      await new Promise(function (r) { setTimeout(r, 900); });
+    }
+    return d;                                    // last known (still unconfirmed)
+  }
+
+  /* ---------- statistics + charts ---------- */
+  var energyChart = null, weeklyChart = null;
+
+  // Shared dark-theme axis options (matches --text-2 / grid on --line-soft).
+  function chartAxes() {
+    return {
+      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#b7c3d6' } },
+      x: { grid: { display: false }, ticks: { color: '#b7c3d6' } }
+    };
+  }
+
+  // Swap a chart canvas for its empty-state message (and back).
+  function setChartEmpty(canvas, emptyEl, isEmpty) {
+    canvas.style.display = isEmpty ? 'none' : '';
+    if (emptyEl) emptyEl.hidden = !isEmpty;
+  }
+
+  function fetchStats() {
+    if (!$('#energyChart') && !$('#weeklyChart')) return;
+    fetch(api('api/stats.php'), { credentials: 'same-origin' })
+      .then(function (res) { return res.json(); })
+      .then(function (json) {
+        if (!json.ok) return;
+
+        // Render today's usage LINE chart (hours of day vs minutes)
+        var ec = $('#energyChart');
+        if (ec && json.today) {
+          var ecEmpty = $('#energyEmpty');
+          var ecTotal = $('#todayTotal');
+          if (ecTotal) {
+            ecTotal.textContent = json.today.has_data
+              ? Number(json.today.total_minutes).toFixed(0) + ' min'
+              : '\u2014';
+          }
+          setChartEmpty(ec, ecEmpty, !json.today.has_data);
+          if (energyChart) { energyChart.destroy(); energyChart = null; }
+          if (json.today.has_data) {
+            energyChart = new Chart(ec.getContext('2d'), {
+              type: 'line',
+              data: {
+                labels: json.today.labels,
+                datasets: [{
+                  label: 'Usage (min)',
+                  data: json.today.minutes,
+                  borderColor: '#5b9dff',
+                  backgroundColor: 'rgba(91,157,255,.12)',
+                  fill: true,
+                  tension: 0.4,
+                  pointRadius: 3,
+                  pointHoverRadius: 5
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: chartAxes()
+              }
+            });
+          }
+        }
+
+        // Render weekly OVERVIEW BAR chart (Mon-Sun vs hours)
+        var wc = $('#weeklyChart');
+        if (wc && json.weekly) {
+          var wcEmpty = $('#weeklyEmpty');
+          var wcTotal = $('#weekTotal');
+          if (wcTotal) {
+            wcTotal.textContent = json.weekly.has_data
+              ? Number(json.weekly.total_hours).toFixed(1) + ' h'
+              : '\u2014';
+          }
+          setChartEmpty(wc, wcEmpty, !json.weekly.has_data);
+          if (weeklyChart) { weeklyChart.destroy(); weeklyChart = null; }
+          if (json.weekly.has_data) {
+            weeklyChart = new Chart(wc.getContext('2d'), {
+              type: 'bar',
+              data: {
+                labels: json.weekly.labels,
+                datasets: [{
+                  label: 'Hours',
+                  data: json.weekly.hours,
+                  backgroundColor: '#5b9dff',
+                  hoverBackgroundColor: '#7db1ff',
+                  borderRadius: 6,
+                  maxBarThickness: 34
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: chartAxes()
+              }
+            });
+          }
+        }
+      })
+      .catch(function () { /* silent - stats are non-critical */ });
+  }
+
+  /* ---------- real-time clock (Asia/Manila) ---------- */
+  function startClock() {
+    var clockEl = $('#liveClock');
+    var dateEl  = $('#liveDate');
+    var greetEl = $('#liveGreet');
+    if (!clockEl) return;
+
+    var manilaOpts = { timeZone: 'Asia/Manila' };
+    var timeFmt = new Intl.DateTimeFormat('en-PH', Object.assign({}, manilaOpts, {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
+    }));
+    var dateFmt = new Intl.DateTimeFormat('en-PH', Object.assign({}, manilaOpts, {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+    }));
+    var hourFmt = new Intl.DateTimeFormat('en-PH', Object.assign({}, manilaOpts, {
+      hour: 'numeric', hour12: false
+    }));
+
+    var lastPeriod = '';
+
+    function manilaHour(now) {
+      var parts = hourFmt.formatToParts(now);
+      var p = parts.find(function (x) { return x.type === 'hour'; });
+      return p ? parseInt(p.value, 10) : now.getUTCHours();
+    }
+
+    function greetingPeriod(h) {
+      return h < 12 ? 'Good morning' : (h < 17 ? 'Good afternoon' : 'Good evening');
+    }
+
+    function tick() {
+      var now = new Date();
+      clockEl.textContent = timeFmt.format(now);
+      clockEl.setAttribute('datetime', now.toISOString());
+      if (dateEl) dateEl.textContent = dateFmt.format(now);
+
+      // Update personalized greeting when the period changes
+      if (greetEl) {
+        var h = manilaHour(now);
+        var period = greetingPeriod(h);
+        if (period !== lastPeriod) {
+          lastPeriod = period;
+          var current = greetEl.textContent;
+          var userNm = current.replace(/^[^,]+,\s*/, '');
+          greetEl.textContent = period + ', ' + userNm;
+        }
+      }
+    }
+    tick();
+    setInterval(tick, 1000);
   }
 
   if (cards.length) {
@@ -358,6 +622,13 @@
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden) refresh();
     });
+  }
+
+  // Start clock and stats regardless of whether devices exist
+  startClock();
+  if ($('#energyChart') || $('#weeklyChart')) {
+    fetchStats();
+    setInterval(fetchStats, 30000);
   }
 
 /* ==========================================================
@@ -445,6 +716,114 @@
     syncDays();
   }
 
+  /* ---------- History page: activity log filters + pagination ---------- */
+  var logPager = $('#logPager');
+  if (logPager) {
+    var logForm = $('#logFilters');
+    var logBody = $('#logBody');
+    var logInfo = $('#logInfo');
+    var logPrev = $('#logPrev');
+    var logNext = $('#logNext');
+    var logState = {
+      page:    parseInt(logPager.dataset.page, 10) || 1,
+      perPage: parseInt(logPager.dataset.perPage, 10) || 10
+    };
+    var logReq = 0;
+    var logSearchTimer = null;
+
+    function logEsc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function logRow(r) {
+      return '<tr>' +
+        '<td>' + logEsc(r.when) + '</td>' +
+        '<td><span class="badge src-' + logEsc(r.source) + '">' + logEsc(r.source_label) + '</span></td>' +
+        '<td>' + logEsc(r.device_name) + '</td>' +
+        '<td>' + logEsc(r.action_label) + '</td>' +
+        '<td class="muted">' + logEsc(r.detail) + '</td>' +
+        '</tr>';
+    }
+
+    function logQuery(page) {
+      var out = { page: page, per_page: logState.perPage };
+      var data = new FormData(logForm);
+      ['q', 'date_from', 'date_to', 'source'].forEach(function (k) {
+        var v = String(data.get(k) || '').trim();
+        if (v) out[k] = v;
+      });
+      return out;
+    }
+
+    function logApply(json) {
+      var p = json.pagination;
+      logState.page = p.page;
+      logPager.dataset.page = p.page;
+      logBody.innerHTML = json.rows.length
+        ? json.rows.map(logRow).join('')
+        : '<tr><td colspan="5" class="muted center">' +
+            (json.filtered ? 'No records match your filters.' : 'Nothing logged yet.') +
+          '</td></tr>';
+      logInfo.innerHTML = p.total > 0
+        ? 'Page <strong>' + p.page + '</strong> of ' + p.total_pages +
+          ' <span class="pager-count">' + Number(p.total).toLocaleString() + ' records</span>'
+        : 'No records';
+      logPrev.disabled = !p.has_prev;
+      logNext.disabled = !p.has_next;
+      // Keep the current view shareable/bookmarkable without reloading.
+      try {
+        var qs = new URLSearchParams(logQuery(p.page)).toString();
+        history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+      } catch (e) { /* older browsers: skip URL sync */ }
+    }
+
+    async function loadLog(page) {
+      var req = ++logReq;
+      logPager.classList.add('is-loading');
+      try {
+        var res = await fetch(api('api/history_log.php') + '?' + new URLSearchParams(logQuery(page)).toString(), {
+          credentials: 'same-origin'
+        });
+        var json = await res.json();
+        if (req !== logReq) return;            // a newer request superseded this one
+        if (!json.ok) throw new Error(json.error || 'Could not load history');
+        logApply(json);
+      } catch (err) {
+        if (req === logReq) toast(err.message, 'err');
+      } finally {
+        if (req === logReq) logPager.classList.remove('is-loading');
+      }
+    }
+
+    logForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      loadLog(1);                              // a new search always restarts at page 1
+    });
+    ['date_from', 'date_to', 'source'].forEach(function (name) {
+      var el = logForm.elements[name];
+      if (el) el.addEventListener('change', function () { loadLog(1); });
+    });
+    logForm.elements['q'].addEventListener('input', function () {
+      clearTimeout(logSearchTimer);
+      logSearchTimer = setTimeout(function () { loadLog(1); }, 350);  // debounced live search
+    });
+    $('#logReset').addEventListener('click', function () {
+      logForm.reset();                         // clear server-rendered defaults too
+      ['q', 'date_from', 'date_to', 'source'].forEach(function (k) {
+        if (logForm.elements[k]) logForm.elements[k].value = '';
+      });
+      loadLog(1);
+    });
+    logPrev.addEventListener('click', function () {
+      if (!logPrev.disabled) loadLog(logState.page - 1);
+    });
+    logNext.addEventListener('click', function () {
+      if (!logNext.disabled) loadLog(logState.page + 1);
+    });
+  }
+
   /* ---------- add-device form toggle (devices page) ---------- */
   window.toggleAddForm = function () {
     var f = $('#addForm');
@@ -470,7 +849,7 @@
     }
     btns.forEach(function (b) { busy(b, false); });
     await refresh();
-    toast(done + ' light' + (done === 1 ? '' : 's') + (turnOn ? ' turned on' : ' turned off'));
+    toast(done + ' command' + (done === 1 ? '' : 's') + ' sent \u2014 devices confirm within a few seconds');
   };
 
   /* ---------- dismiss flash messages after a few seconds ---------- */

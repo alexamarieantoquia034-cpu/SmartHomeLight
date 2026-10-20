@@ -53,6 +53,37 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && hash_equals(csrf_token(), (
         header('Location: ' . url('schedules.php'));
         exit;
     }
+
+    if ($action === 'update') {
+        // Edit an existing schedule - same validation as create.
+        $id       = (int)($_POST['id'] ?? 0);
+        $deviceId = (int)($_POST['device_id'] ?? 0);
+        $time     = (string)($_POST['time_of_day'] ?? '');
+        $days     = (string)($_POST['days_of_week'] ?? '');
+
+        if ($id > 0 && $deviceId > 0 && preg_match('/^\d{2}:\d{2}$/', $time)
+            && preg_match('/^[01]{7}$/', $days)) {
+            $label = trim((string)($_POST['label'] ?? '')) ?: 'Schedule';
+            $stmt = db()->prepare(
+                'UPDATE schedules
+                    SET device_id = ?, label = ?, time_of_day = ?, days_of_week = ?,
+                        is_on = ?, brightness = ?, color_r = ?, color_g = ?, color_b = ?
+                  WHERE id = ?'
+            );
+            $stmt->execute([
+                $deviceId, $label, $time . ':00', $days,
+                clamp_int($_POST['is_on'] ?? 1, 0, 1),
+                clamp_int($_POST['brightness'] ?? 100, 0, 100),
+                clamp_channel($_POST['r'] ?? 255),
+                clamp_channel($_POST['g'] ?? 214),
+                clamp_channel($_POST['b'] ?? 175),
+                $id,
+            ]);
+            log_activity($deviceId, 'web', 'schedule_updated', "$label at $time");
+        }
+        header('Location: ' . url('schedules.php'));
+        exit;
+    }
 }
 
 $schedules = db()->query(
@@ -63,6 +94,17 @@ $schedules = db()->query(
 )->fetchAll();
 
 $dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Editing an existing schedule via schedules.php?edit=ID - prefill the form.
+$editId = (int)($_GET['edit'] ?? 0);
+$edit   = null;
+if ($editId > 0) {
+    foreach ($schedules as $s) {
+        if ((int)$s['id'] === $editId) { $edit = $s; break; }
+    }
+}
+$labelOptions = ['Morning', 'Afternoon', 'Evening', 'Early Morning'];
+
 render_header('Schedules', 'schedules');
 ?>
 
@@ -76,68 +118,83 @@ render_header('Schedules', 'schedules');
     <h1>Schedules</h1>
     <p class="sub">Automatically switch lights on or off at a set time.</p>
   </div>
+  <div class="header-right">
+    <div class="page-head-clock">
+      <time id="liveClock" datetime=""></time>
+      <div id="liveDate"></div>
+    </div>
+  </div>
 </div>
 
 <div class="card">
-  <h2>New schedule</h2>
+  <h2><?= $edit ? 'Edit schedule' : 'New schedule' ?></h2>
   <?php if ($devices): ?>
   <form method="post" action="<?= url('schedules.php') ?>">
     <?= csrf_field() ?>
-    <input type="hidden" name="action" value="create">
+    <input type="hidden" name="action" value="<?= $edit ? 'update' : 'create' ?>">
+    <?php if ($edit): ?>
+      <input type="hidden" name="id" value="<?= (int)$edit['id'] ?>">
+    <?php endif; ?>
     <div class="form-row">
       <label class="field">
         <span>Device</span>
         <select name="device_id" required>
           <?php foreach ($devices as $d): ?>
-            <option value="<?= (int)$d['id'] ?>"><?= e($d['name']) ?> (<?= e($d['room']) ?>)</option>
+            <option value="<?= (int)$d['id'] ?>"<?= ($edit && (int)$edit['device_id'] === (int)$d['id']) ? ' selected' : '' ?>><?= e($d['name']) ?> (<?= e($d['room']) ?>)</option>
           <?php endforeach; ?>
         </select>
       </label>
      <label class="field">
   <span>Time Period</span>
   <select name="label" required>
-    <option value="" disabled selected>Select Time Period</option>
-    <option value="Morning">Morning</option>
-    <option value="Afternoon">Afternoon</option>
-    <option value="Evening">Evening</option>
-    <option value="Early Morning">Early Morning</option>
+    <option value="" disabled <?= $edit ? '' : 'selected' ?>>Select Time Period</option>
+    <?php foreach ($labelOptions as $lo): ?>
+      <option value="<?= e($lo) ?>"<?= ($edit && $edit['label'] === $lo) ? ' selected' : '' ?>><?= e($lo) ?></option>
+    <?php endforeach; ?>
+    <?php if ($edit && !in_array($edit['label'], $labelOptions, true)): ?>
+      <option value="<?= e($edit['label']) ?>" selected><?= e($edit['label']) ?></option>
+    <?php endif; ?>
   </select>
 </label>
       <label class="field">
         <span>Time</span>
-        <input type="time" name="time_of_day" value="07:00" required>
+        <input type="time" name="time_of_day" value="<?= $edit ? e(substr((string)$edit['time_of_day'], 0, 5)) : '07:00' ?>" required>
       </label>
     </div>
 
     <div class="field">
       <span>Repeated days</span>
       <div class="day-picker">
-        <?php for ($i = 0; $i < 7; $i++): ?>
+        <?php for ($i = 0; $i < 7; $i++):
+          $dayOn = $edit ? (((string)$edit['days_of_week'])[$i] === '1') : true; ?>
           <label class="day">
-            <input type="checkbox" class="day-box" data-index="<?= $i ?>" checked>
+            <input type="checkbox" class="day-box" data-index="<?= $i ?>"<?= $dayOn ? ' checked' : '' ?>>
             <span><?= $dayNames[$i] ?></span>
           </label>
         <?php endfor; ?>
-        <input type="hidden" name="days_of_week" id="daysOfWeek" value="1111111">
+        <input type="hidden" name="days_of_week" id="daysOfWeek" value="<?= $edit ? e($edit['days_of_week']) : '1111111' ?>">
       </div>
     </div>
 
     <div class="form-row">
       <label class="field">
         <span>Action</span>
-        <select name="is_on">
-          <option value="" disabled selected>Select Option</option>
-          <option value="1">Turn on</option>
-          <option value="0">Turn off</option>
+        <select name="is_on" required>
+          <option value="" disabled <?= $edit ? '' : 'selected' ?>>Select Option</option>
+          <option value="1"<?= ($edit && (int)$edit['is_on'] === 1) ? ' selected' : '' ?>>Turn on</option>
+          <option value="0"<?= ($edit && (int)$edit['is_on'] === 0) ? ' selected' : '' ?>>Turn off</option>
         </select>
       </label>
       <label class="field">
         <span>Brightness %</span>
-        <input type="number" name="brightness" min="0" max="100" value="100">
+        <input type="number" name="brightness" min="0" max="100" value="<?= $edit ? (int)$edit['brightness'] : 100 ?>">
       </label>
     </div>
 
-    <button class="btn btn-primary" type="submit">Add schedule</button>
+    <button class="btn btn-primary" type="submit"><?= $edit ? 'Save changes' : 'Add schedule' ?></button>
+    <?php if ($edit): ?>
+      <a class="btn" href="<?= url('schedules.php') ?>">Cancel</a>
+    <?php endif; ?>
   </form>
   <?php else: ?>
     <p class="muted">Add a device first.</p>
@@ -173,6 +230,7 @@ render_header('Schedules', 'schedules');
           <td><?= e(time_ago($s['last_run'])) ?></td>
           <td class="actions">
             <button class="btn btn-sm" onclick="runNow(<?= (int)$s['id'] ?>, this)">Run now</button>
+            <a class="btn btn-sm" href="<?= url('schedules.php') ?>?edit=<?= (int)$s['id'] ?>">Edit</a>
             <form method="post" action="<?= url('schedules.php') ?>" class="inline-form">
               <?= csrf_field() ?>
               <input type="hidden" name="action" value="toggle">
@@ -198,7 +256,10 @@ render_header('Schedules', 'schedules');
 <div class="card help">
   <h2>Running schedules automatically</h2>
   <p class="muted">
-    Schedules fire from <code>cron/run_schedules.php</code>. In Windows, add a Task Scheduler job that runs
+    Schedules fire automatically in two ways: <b>server-side on every ESP32 poll</b>
+    (no browser or cron needed &mdash; a due schedule fires within seconds of its set
+    time because the device polls every ~5 s) and from <code>cron/run_schedules.php</code>
+    as a second runner. For the cron runner, add a Windows Task Scheduler job that runs
     this command once a minute:
   </p>
   <pre class="code">"C:\xampp\php\php.exe" "C:\xampp\htdocs\smarhomelight_backup\cron\run_schedules.php"</pre>

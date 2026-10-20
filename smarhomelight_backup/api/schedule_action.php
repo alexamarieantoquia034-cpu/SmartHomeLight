@@ -73,13 +73,21 @@ switch ($action) {
         $deviceId = (int)$s['device_id'];
         $device = get_device($deviceId);
 
-        apply_light_state($deviceId, [
+        db()->prepare("UPDATE devices SET op_mode = 'schedule' WHERE id = ?")->execute([$deviceId]);
+    apply_light_state($deviceId, [
             'is_on'      => (int)$s['is_on'],
             'brightness' => (int)$s['brightness'],
             'color_r'    => (int)$s['color_r'],
             'color_g'    => (int)$s['color_g'],
             'color_b'    => (int)$s['color_b'],
         ], 'schedule');
+
+        // A manually-run schedule owns the relay too (same as cron).
+        db()->prepare("UPDATE devices SET op_mode = 'schedule' WHERE id = ? AND op_mode <> 'schedule'")
+            ->execute([$deviceId]);
+        // A schedule fired -> this device is now Schedule-driven
+        // (LDR must not override it).
+        set_op_mode($deviceId, 'schedule');
 
         if ((int)$s['is_on'] === 1 && $device && !$device['is_on']) {
             record_energy_turn_on($deviceId);

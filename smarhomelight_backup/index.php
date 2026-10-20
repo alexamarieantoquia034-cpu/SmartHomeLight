@@ -53,19 +53,30 @@ render_header('Dashboard', 'dashboard');
 
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
 
+<!-- Chart.js for usage statistics charts -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+
 <div class="page-head">
-  <div>
-    <h1><?= e($greet) ?>, <?= e($userNm) ?></h1>
+  <div class="greeting-col">
+    <div class="greeting-row">
+      <h1 id="liveGreet"><?= e($greet) ?>, <?= e($userNm) ?></h1>
+    </div>
     <p class="sub">Here's what's happening with your lights right now.</p>
   </div>
-  <div class="actions">
-    <div class="pill <?= $totalOnline ? 'pill-ok' : 'pill-warn' ?>" id="connStatus">
-      <?= $totalOnline ?> / <?= count($devices) ?> device<?= count($devices) === 1 ? '' : 's' ?> online
+  <div class="header-right">
+    <div class="page-head-clock">
+      <time id="liveClock" datetime=""></time>
+      <div id="liveDate"></div>
     </div>
-    <?php if ($devices): ?>
-      <button class="btn" type="button" onclick="bulkToggle(false)">All off</button>
-      <button class="btn btn-primary" type="button" onclick="bulkToggle(true)">All on</button>
-    <?php endif; ?>
+    <div class="actions">
+      <div class="pill <?= $totalOnline ? 'pill-ok' : 'pill-warn' ?>" id="connStatus">
+        <?= $totalOnline ?> / <?= count($devices) ?> device<?= count($devices) === 1 ? '' : 's' ?> online
+      </div>
+      <?php if ($devices): ?>
+        <button class="btn" type="button" onclick="bulkToggle(false)">All off</button>
+        <button class="btn btn-primary" type="button" onclick="bulkToggle(true)">All on</button>
+      <?php endif; ?>
+    </div>
   </div>
 </div>
 
@@ -121,6 +132,10 @@ render_header('Dashboard', 'dashboard');
             : 'background:rgba(120,130,150,.10);box-shadow:none';
         $wash = $d['is_on'] ? "rgba($rgb,.16)" : 'transparent';
         $hexv = sprintf('#%02x%02x%02x', $d['color_r'], $d['color_g'], $d['color_b']);
+        // Initial STATE readout = the hardware's LAST REPORTED state
+        // (actual_on, written by the ESP32 heartbeat) - not the desired one.
+        $shownOn = (!empty($d['reported_at']))
+            ? (bool)$d['actual_on'] : (bool)$d['is_on'];
       ?>
       <article class="card light-card<?= $d['is_on'] ? ' is-on' : '' ?><?= $d['online'] ? '' : ' is-offline' ?>"
                data-device="<?= (int)$d['id'] ?>"
@@ -144,7 +159,7 @@ render_header('Dashboard', 'dashboard');
         </div>
 
         <div class="light-meta">
-          <span data-role="state"><?= $d['is_on'] ? 'ON' : 'OFF' ?></span>
+          <span data-role="state"><?= $shownOn ? 'ON' : 'OFF' ?></span>
           <span class="dot">&bull;</span>
           <span data-role="brightness"><?= $d['brightness'] ?>%</span>
           <span class="dot">&bull;</span>
@@ -154,6 +169,18 @@ render_header('Dashboard', 'dashboard');
         </div>
 
         <div class="sync-note" data-role="sync">&mdash;</div>
+
+        <div class="mode-row" role="group" aria-label="Operating mode">
+          <button class="mode-pill<?= $d['op_mode'] === 'auto' ? ' active' : '' ?>"
+                  type="button" data-action="mode-pill" data-mode="auto"
+                  title="LDR sensor owns the relay">&#9889; Auto</button>
+          <button class="mode-pill<?= $d['op_mode'] === 'manual' ? ' active' : '' ?>"
+                  type="button" data-action="mode-pill" data-mode="manual"
+                  title="Dashboard owns the relay - LDR is ignored">&#9998; Manual</button>
+          <button class="mode-pill<?= $d['op_mode'] === 'schedule' ? ' active' : '' ?>"
+                  type="button" data-action="mode-pill" data-mode="schedule"
+                  title="Schedules own the relay - LDR is ignored">&#9200; Schedule</button>
+        </div>
 
         <div class="power-row">
           <button class="btn btn-power <?= $d['is_on'] ? 'on' : '' ?>" type="button" data-action="toggle">
@@ -177,6 +204,32 @@ render_header('Dashboard', 'dashboard');
         </footer>
       </article>
     <?php endforeach; ?>
+  </section>
+<?php endif; ?>
+
+<?php if ($devices): ?>
+
+<!-- Statistics & Usage Charts Section -->
+  <section class="stats-charts">
+    <h2 class="section-title">Usage Statistics</h2>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-head">
+          <h3>Today's Usage</h3>
+          <span class="chart-total" id="todayTotal">&mdash;</span>
+        </div>
+        <canvas id="energyChart" height="200"></canvas>
+        <p class="chart-empty" id="energyEmpty" hidden>No usage recorded yet today.</p>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head">
+          <h3>Weekly Overview</h3>
+          <span class="chart-total" id="weekTotal">&mdash;</span>
+        </div>
+        <canvas id="weeklyChart" height="200"></canvas>
+        <p class="chart-empty" id="weeklyEmpty" hidden>No usage recorded this week.</p>
+      </div>
+    </div>
   </section>
 <?php endif; ?>
 

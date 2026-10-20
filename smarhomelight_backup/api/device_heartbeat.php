@@ -89,10 +89,44 @@ if ($isOn === 1 && $wasOn === 0) {
     log_activity($deviceId, 'esp32', 'turned_on', 'brightness=' . (int)($in['brightness'] ?? 0));
 }
 
+// ---- Operating mode echo ---------------------------------------------------
+// The firmware only includes op_mode in a heartbeat when the mode changed
+// LOCALLY (serial console command), so a normal heartbeat can never carry a
+// stale echo of a mode the device saw at an earlier poll. On top of that,
+// the backend wins any conflict it initiated in the last 10 s: if the user
+// just pressed Auto/Manual/Schedule (or a web command took ownership, or a
+// schedule fired) and an out-of-date echo arrives afterwards, we keep the
+// backend's mode. The device adopts it on its very next poll anyway.
+// This closes the auto/manual race that used to silently undo user commands.
+$dbMode = in_array($device['op_mode'] ?? 'auto', ['auto', 'manual', 'schedule'], true)
+    ? ($device['op_mode'] ?? 'auto') : 'auto';
+
+if (isset($in['op_mode']) && in_array($in['op_mode'], ['auto', 'manual', 'schedule'], true)
+    && $in['op_mode'] !== $dbMode) {
+    $stale = false;
+    $lastChange = db()->prepare(
+        "SELECT created_at FROM activity_log
+          WHERE device_id = ? AND action = 'op_mode' AND detail = ?
+          ORDER BY id DESC LIMIT 1"
+    );
+    $lastChange->execute([$deviceId, $dbMode]);
+    $changedAt = $lastChange->fetchColumn();
+    if ($changedAt !== false && (time() - strtotime((string)$changedAt)) < 10) {
+        $stale = true;
+    }
+    if (!$stale) {
+        db()->prepare('UPDATE devices SET op_mode = ? WHERE id = ?')
+            ->execute([$in['op_mode'], $deviceId]);
+        $dbMode = $in['op_mode'];
+    }
+}
+
 // When the ESP32 reports an AUTO (LDR-driven) change, mirror it into the
 // desired state too, so the dashboard's toggle/bulb follows the sensor.
-// Manual web commands are unaffected (they never set auto=1).
-if (!empty($in['auto'])) {
+// ONLY while auto is the current authoritative mode: an in-flight heartbeat
+// sent just before the user switched to manual/schedule must not overwrite
+// the user's command in light_state.
+if (!empty($in['auto']) && $dbMode === 'auto') {
     $autoBri = clamp_int($in['brightness'] ?? 0, 0, 100);
     db()->prepare(
         'UPDATE light_state SET is_on = ?, brightness = ? WHERE device_id = ?'

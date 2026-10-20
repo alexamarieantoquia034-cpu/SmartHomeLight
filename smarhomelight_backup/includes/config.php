@@ -20,7 +20,10 @@ return [
     // Leave 'auto' to detect the folder automatically, or set e.g. '/smarhomelight_backup'
     'base_path'   => 'auto',
     'site_name'   => 'SmartHome Light',
-    'timezone'    => 'Asia/Jakarta',
+    // Schedule evaluation timezone. Asia/Manila is what the project runs on
+    // (UTC+08:00) - db.php applies this at include time AND pushes the same
+    // offset to MySQL, so NOW(), date() and the dashboard clock all agree.
+    'timezone'    => 'Asia/Manila',
 
     // ---------- Session ----------
     'session_name' => 'smarthome_light_sess',

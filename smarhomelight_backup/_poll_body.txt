@@ -1,0 +1,1 @@
+{"ok":true,"server_time":"2026-10-17T22:02:01+07:00","commands":[],"desired":{"is_on":0,"brightness":100,"color":[255,214,175],"mode":"white","op_mode":"auto"},"op_mode":"auto","poll_interval":5}

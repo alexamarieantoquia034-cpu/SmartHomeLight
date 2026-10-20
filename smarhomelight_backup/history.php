@@ -45,13 +45,19 @@ $maxWh = $maxWh > 0 ? $maxWh : 1.0;
 $totalWh = array_sum(array_column($series, 'wh'));
 $totalMin = array_sum(array_column($series, 'minutes'));
 
-// Recent activity
-$logs = db()->query(
-    'SELECT l.*, d.name AS device_name
-       FROM activity_log l
-       LEFT JOIN devices d ON d.id = l.device_id
-      ORDER BY l.id DESC LIMIT 60'
-)->fetchAll();
+// Activity log: search / date filters + database pagination (newest first).
+// activity_log_page() computes the page count from a COUNT(*) over the SAME
+// filters and clamps the requested page into [1, total_pages], so a stale or
+// bogus ?page= can never render an invalid page number.
+$logFilters = activity_log_filters($_GET);
+$rawPage    = $_GET['page'] ?? 1;
+$rawPerPage = $_GET['per_page'] ?? 10;
+$logPage    = is_scalar($rawPage) ? filter_var($rawPage, FILTER_VALIDATE_INT) : false;
+$logPerPage = is_scalar($rawPerPage) ? filter_var($rawPerPage, FILTER_VALIDATE_INT) : false;
+$logPage    = $logPage !== false && $logPage > 0 ? $logPage : 1;
+$logPerPage = $logPerPage !== false && $logPerPage > 0 ? $logPerPage : 10;
+$log        = activity_log_page($logFilters, $logPage, $logPerPage);
+$logs       = array_map('activity_log_view', $log['rows']);
 
 render_header('History', 'history');
 ?>
@@ -65,6 +71,12 @@ render_header('History', 'history');
   <div>
     <h1>History</h1>
     <p class="sub">Estimated energy use and recent activity (last 7 days).</p>
+  </div>
+  <div class="header-right">
+    <div class="page-head-clock">
+      <time id="liveClock" datetime=""></time>
+      <div id="liveDate"></div>
+    </div>
   </div>
 </div>
 
@@ -119,65 +131,78 @@ render_header('History', 'history');
   <?php endif; ?>
 </div>
 
-<section class="table-wrap card">
+<section class="card">
   <h2>Activity log</h2>
-  <table class="table">
-    <thead>
-      <tr><th>When</th><th>Source</th><th>Device</th><th>Action</th><th>Detail</th></tr>
-    </thead>
+
+  <form class="log-filters" id="logFilters" autocomplete="off">
+    <input type="search" name="q" id="logQ"
+           placeholder="Search action, detail or device…"
+           value="<?= e($logFilters['q']) ?>" aria-label="Search history">
+    <input type="date" name="date_from" id="logFrom"
+           value="<?= e($logFilters['date_from']) ?>" aria-label="From date">
+    <input type="date" name="date_to" id="logTo"
+           value="<?= e($logFilters['date_to']) ?>" aria-label="To date">
+    <select name="source" id="logSource" aria-label="Event source">
+      <option value="">All sources</option>
+      <?php foreach (['web', 'esp32', 'schedule', 'system'] as $src): ?>
+        <option value="<?= $src ?>"<?= $logFilters['source'] === $src ? ' selected' : '' ?>><?= ucfirst($src) ?></option>
+      <?php endforeach; ?>
+    </select>
+    <button type="submit" class="btn btn-primary">Apply</button>
+    <button type="button" class="btn btn-ghost" id="logReset">Reset</button>
+  </form>
+
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr><th>When</th><th>Source</th><th>Device</th><th>Action</th><th>Detail</th></tr>
+      </thead>
    
-<tbody>
+<tbody id="logBody">
   <?php foreach ($logs as $l): ?>
-    <?php
-      $detail = $l['detail'] ?? '';
-      $readableDetail = $detail;
-
-      // Convert technical details into readable messages
-      if (str_contains($detail, 'is_on=1')) {
-          $readableDetail = 'Light turned ON';
-      } elseif (str_contains($detail, 'is_on=0')) {
-          $readableDetail = 'Light turned OFF';
-      }
-
-      // Include brightness information when available
-      if (preg_match('/brightness=(\d+)/', $detail, $matches)) {
-          $brightness = $matches[1];
-          $readableDetail .= ' • Brightness set to ' . $brightness . '%';
-      }
-
-      // Convert schedule details
-      if (str_contains($detail, 'Evening at')) {
-          $readableDetail = 'Schedule set for ' .
-              str_replace('Evening at ', '', $detail);
-      }
-    ?>
     <tr>
-      <td>
-  <?= date('M d, Y g:i A', strtotime($l['created_at'])) ?>
-</td>
+      <td><?= e($l['when']) ?></td>
 
       <td>
-        <span class="badge src-<?= e($l['source']) ?>">
-          <?= e(ucfirst($l['source'])) ?>
-        </span>
+        <span class="badge src-<?= e($l['source']) ?>"><?= e($l['source_label']) ?></span>
       </td>
 
-      <td><?= e($l['device_name'] ?? '-') ?></td>
+      <td><?= e($l['device_name']) ?></td>
 
-      <td><?= e(ucwords(str_replace('_', ' ', $l['action']))) ?></td>
+      <td><?= e($l['action_label']) ?></td>
 
-      <td class="muted"><?= e($readableDetail) ?></td>
+      <td class="muted"><?= e($l['detail']) ?></td>
     </tr>
   <?php endforeach; ?>
 
   <?php if (!$logs): ?>
     <tr>
-      <td colspan="5" class="muted center">Nothing logged yet.</td>
+      <td colspan="5" class="muted center"><?= $logFilters['active'] ? 'No records match your filters.' : 'Nothing logged yet.' ?></td>
     </tr>
   <?php endif; ?>
 </tbody>
 
-  </table>
+    </table>
+  </div>
+
+  <!-- Pagination: data-* seed the JS; buttons come pre-disabled from the DB
+       counts so the control is correct even before app.js runs. -->
+  <div class="pager" id="logPager"
+       data-page="<?= (int)$log['page'] ?>"
+       data-per-page="<?= (int)$log['per_page'] ?>">
+    <button type="button" class="btn pager-btn" id="logPrev"
+            <?= $log['has_prev'] ? '' : 'disabled' ?>>&lt; Previous</button>
+    <span class="pager-info" id="logInfo">
+      <?php if ($log['total'] > 0): ?>
+        Page <strong><?= (int)$log['page'] ?></strong> of <?= (int)$log['total_pages'] ?>
+        <span class="pager-count"><?= number_format($log['total']) ?> records</span>
+      <?php else: ?>
+        No records
+      <?php endif; ?>
+    </span>
+    <button type="button" class="btn pager-btn" id="logNext"
+            <?= $log['has_next'] ? '' : 'disabled' ?>>Next &gt;</button>
+  </div>
 </section>
 
 <?php render_footer(); ?>

@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS `devices` (
   `actual_mode`      ENUM('white','color') NOT NULL DEFAULT 'white',
   `ldr`              SMALLINT UNSIGNED NOT NULL DEFAULT 0,  -- last LDR raw reading (0..4095)
   `room_dark`        TINYINT(1)   NOT NULL DEFAULT 0,       -- 1 when the room read as dark
+  -- Who currently owns the relay: the LDR sensor (auto), the dashboard
+  -- (manual - a bounded 60 s hold after each web command) or the schedule
+  -- runner (schedule). The dashboard never sends this directly; the backend
+  -- and the ESP32 heartbeat/poll cycle maintain it.
+  `op_mode`          ENUM('auto','manual','schedule') NOT NULL DEFAULT 'auto',
   `reported_at`      DATETIME     NULL DEFAULT NULL,
   `created_at`     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

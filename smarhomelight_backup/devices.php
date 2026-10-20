@@ -18,8 +18,14 @@ render_header('Devices', 'devices');
     <h1>Devices</h1>
     <p class="sub">Every ESP32 needs a unique device key. Paste it into the sketch.</p>
   </div>
-  <div class="actions">
-    <button class="btn btn-primary" type="button" onclick="toggleAddForm()">+ Add device</button>
+  <div class="header-right">
+    <div class="page-head-clock">
+      <time id="liveClock" datetime=""></time>
+      <div id="liveDate"></div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" type="button" onclick="toggleAddForm()">+ Add device</button>
+    </div>
   </div>
 </div>
 

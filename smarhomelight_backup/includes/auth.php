@@ -61,7 +61,12 @@ function is_logged_in(): bool
 function current_username(): string
 {
     start_session();
-    return $_SESSION['full_name'] ?: ($_SESSION['username'] ?? 'User');
+    $name = $_SESSION['full_name'] ?: ($_SESSION['username'] ?? 'User');
+    // Normalize legacy display name for consistent user-facing text.
+    if ($name === 'System Administrator') {
+        $name = 'Administrator';
+    }
+    return $name;
 }
 
 /** Page guard - redirect to login when not authenticated. */

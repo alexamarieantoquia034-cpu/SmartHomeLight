@@ -77,11 +77,270 @@ function log_activity(?int $deviceId, string $source, string $action, $detail = 
     ]);
 }
 
+/**
+ * Normalize History-page activity-log filters.
+ * Returns q / date_from / date_to / source (invalid values silently dropped
+ * so a bad bookmarked URL still renders) plus an 'active' flag used for the
+ * empty-state message.
+ */
+function activity_log_filters(array $input): array
+{
+    $q = is_string($input['q'] ?? null) ? trim($input['q']) : '';
+    $q = function_exists('mb_substr') ? mb_substr($q, 0, 100) : substr($q, 0, 100);
+
+    $dateFrom = is_string($input['date_from'] ?? null) ? trim($input['date_from']) : '';
+    $dateTo   = is_string($input['date_to'] ?? null) ? trim($input['date_to']) : '';
+    $okFrom   = DateTime::createFromFormat('!Y-m-d', $dateFrom);
+    $okTo     = DateTime::createFromFormat('!Y-m-d', $dateTo);
+    if (!$okFrom || $okFrom->format('Y-m-d') !== $dateFrom) { $dateFrom = ''; }
+    if (!$okTo   || $okTo->format('Y-m-d')   !== $dateTo)   { $dateTo   = ''; }
+
+    $source = is_string($input['source'] ?? null) ? strtolower(trim($input['source'])) : '';
+    if (!in_array($source, ['web', 'esp32', 'schedule', 'system'], true)) {
+        $source = '';
+    }
+
+    return [
+        'q'         => $q,
+        'date_from' => $dateFrom,
+        'date_to'   => $dateTo,
+        'source'    => $source,
+        'active'    => ($q !== '' || $dateFrom !== '' || $dateTo !== '' || $source !== ''),
+    ];
+}
+
+/**
+ * Fetch one page of the History activity log, newest first.
+ *
+ * The page count always comes from a COUNT(*) over the SAME filters, and the
+ * requested page is clamped into [1, total_pages], so a stale or bogus ?page=
+ * can never render an invalid page number. All filter values are bound as
+ * prepared-statement parameters; LIMIT/OFFSET are bound as integers.
+ *
+ * Returns: rows (raw), page, per_page, total, total_pages, has_prev, has_next.
+ */
+function activity_log_page(array $filters, int $page, int $perPage = 10): array
+{
+    $perPage = max(5, min(100, $perPage));
+
+    $where  = [];
+    $params = [];
+
+    if ($filters['q'] !== '') {
+        // Escape LIKE wildcards; MySQL's default escape character is backslash.
+        $like   = '%' . addcslashes($filters['q'], '\\%_') . '%';
+        $where[] = '(l.action LIKE ? OR l.detail LIKE ? OR l.source LIKE ? OR d.name LIKE ?)';
+        array_push($params, $like, $like, $like, $like);
+    }
+    if ($filters['date_from'] !== '') {
+        $where[]  = 'l.created_at >= ?';
+        $params[] = $filters['date_from'] . ' 00:00:00';
+    }
+    if ($filters['date_to'] !== '') {
+        $where[]  = 'l.created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+        $params[] = $filters['date_to'];
+    }
+    if ($filters['source'] !== '') {
+        $where[]  = 'l.source = ?';
+        $params[] = $filters['source'];
+    }
+
+    $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+    $count = db()->prepare(
+        'SELECT COUNT(*)
+           FROM activity_log l
+           LEFT JOIN devices d ON d.id = l.device_id
+          ' . $whereSql
+    );
+    $count->execute($params);
+    $total      = (int)$count->fetchColumn();
+    $totalPages = max(1, (int)ceil($total / $perPage));
+    $page       = max(1, min($page, $totalPages));
+
+    $stmt = db()->prepare(
+        'SELECT l.id, l.device_id, l.source, l.action, l.detail, l.created_at,
+                d.name AS device_name
+           FROM activity_log l
+           LEFT JOIN devices d ON d.id = l.device_id
+          ' . $whereSql . '
+          ORDER BY l.id DESC
+          LIMIT ? OFFSET ?'
+    );
+    $i = 1;
+    foreach ($params as $p) {
+        $stmt->bindValue($i++, $p);
+    }
+    $stmt->bindValue($i++, $perPage, PDO::PARAM_INT);
+    $stmt->bindValue($i++, ($page - 1) * $perPage, PDO::PARAM_INT);
+    $stmt->execute();
+
+    return [
+        'rows'        => $stmt->fetchAll(),
+        'page'        => $page,
+        'per_page'    => $perPage,
+        'total'       => $total,
+        'total_pages' => $totalPages,
+        'has_prev'    => $page > 1,
+        'has_next'    => $page < $totalPages,
+    ];
+}
+
+/**
+ * Display-ready view of one activity_log row. Shared by history.php (initial
+ * server render) and api/history_log.php (AJAX pages) so the formatting rules
+ * can never drift between the two.
+ */
+function activity_log_view(array $l): array
+{
+    $detail        = (string)($l['detail'] ?? '');
+    $readableDetail = $detail;
+
+    // Convert technical details into readable messages
+    if (str_contains($detail, 'is_on=1')) {
+        $readableDetail = 'Light turned ON';
+    } elseif (str_contains($detail, 'is_on=0')) {
+        $readableDetail = 'Light turned OFF';
+    }
+
+    // Include brightness information when available
+    if (preg_match('/brightness=(\d+)/', $detail, $matches)) {
+        $readableDetail .= ' • Brightness set to ' . $matches[1] . '%';
+    }
+
+    // Convert schedule details
+    if (str_contains($detail, 'Evening at')) {
+        $readableDetail = 'Schedule set for ' . str_replace('Evening at ', '', $detail);
+    }
+
+    return [
+        'id'           => (int)($l['id'] ?? 0),
+        'when'         => date('M d, Y g:i A', strtotime((string)($l['created_at'] ?? ''))),
+        'source'       => (string)($l['source'] ?? ''),
+        'source_label' => ucfirst((string)($l['source'] ?? '')),
+        'device_name'  => ($l['device_name'] ?? '-'),
+        'action_label' => ucwords(str_replace('_', ' ', (string)($l['action'] ?? ''))),
+        'detail'       => $readableDetail,
+    ];
+}
+
 /** Ensure a light_state row exists. */
 function ensure_state_row(int $deviceId): void
 {
     $stmt = db()->prepare('INSERT IGNORE INTO light_state (device_id) VALUES (?)');
     $stmt->execute([$deviceId]);
+}
+
+/** Set operating mode: auto | manual | schedule. Single place of truth. */
+function set_op_mode(int $deviceId, string $op): void
+{
+    $op = in_array($op, ['auto', 'manual', 'schedule'], true) ? $op : 'auto';
+    ensure_state_row($deviceId);
+    db()->prepare('UPDATE devices SET op_mode = ? WHERE id = ?')->execute([$op, $deviceId]);
+    log_activity($deviceId, 'system', 'op_mode', $op);
+}
+
+/**
+ * Apply a desired-state change: update light_state + queue set_state command.
+ * $source: 'web' | 'schedule' (used for activity log).
+ */
+function apply_light_state(int $deviceId, array $target, string $source = 'web'): void
+{
+    ensure_state_row($deviceId);
+    $fields = [];
+    $params = [];
+    foreach (['is_on', 'brightness', 'color_r', 'color_g', 'color_b', 'mode'] as $k) {
+        if (array_key_exists($k, $target)) {
+            $fields[] = "$k = ?";
+            $params[] = $target[$k];
+        }
+    }
+    if ($fields) {
+        $params[] = $deviceId;
+        db()->prepare('UPDATE light_state SET ' . implode(', ', $fields) . ' WHERE device_id = ?')->execute($params);
+    }
+    queue_command($deviceId, 'set_state', $target);
+    log_activity($deviceId, $source, 'set_state', $target);
+}
+
+/**
+ * Fire every schedule whose time has arrived, in the configured timezone
+ * (Asia/Manila). Safe to call as often as you like - the ESP32 polls this
+ * endpoint every ~5 s and Windows Task Scheduler runs cron/run_schedules.php
+ * once a minute, so both can hit the same second. An atomic claim on
+ * schedules.last_run guarantees each schedule fires at most once per matching
+ * minute even when two runners race, which is what prevents duplicate relay
+ * actions after repeated polls or an ESP32 reconnect.
+ *
+ * $deviceId: restrict to one device (ESP32 poll) or null for all (cron).
+ * Returns how many schedules actually fired.
+ */
+function run_due_schedules(?int $deviceId = null): int
+{
+    // Current minute, evaluated in the configured (Asia/Manila) timezone.
+    // date('H:i:00') zeroes the seconds, so ANY second inside the matching
+    // minute still resolves the schedule - a late runner cannot skip it.
+    $time        = date('H:i:00');
+    $dow         = (int)date('w');                       // 0 = Sunday
+    $minuteStart = date('Y-m-d H:i:00');                 // start of that minute
+
+    $sql    = 'SELECT * FROM schedules
+                WHERE enabled = 1 AND time_of_day = ?
+                  AND SUBSTRING(days_of_week, ?, 1) = "1"';
+    $params = [$time, $dow + 1];                          // days string is 1=Sun .. 7=Sat
+    if ($deviceId !== null) {
+        $sql .= ' AND device_id = ?';
+        $params[] = $deviceId;
+    }
+    $stmt = db()->prepare($sql);
+    $stmt->execute($params);
+    $due = $stmt->fetchAll();
+    if (!$due) {
+        return 0;
+    }
+
+    $ran = 0;
+    foreach ($due as $s) {
+        // Atomic claim: only ONE runner wins this schedule for this minute.
+        // rowCount 0 means cron and the ESP32 poll reached it at the same
+        // time (or it already ran) - skip instead of double-executing.
+        $claim = db()->prepare(
+            'UPDATE schedules SET last_run = NOW()
+              WHERE id = ?
+                AND (last_run IS NULL OR last_run < ?)'
+        );
+        $claim->execute([(int)$s['id'], $minuteStart]);
+        if ($claim->rowCount() !== 1) {
+            continue;
+        }
+
+        $deviceIdNow = (int)$s['device_id'];
+        $device      = get_device($deviceIdNow);
+        if (!$device) {
+            continue;
+        }
+
+        // A fired schedule owns the relay: switch to SCHEDULE mode BEFORE
+        // applying the state so the LDR can never undo the timed action,
+        // and so the ESP32 poll reports schedule as the active mode.
+        set_op_mode($deviceIdNow, 'schedule');
+        apply_light_state($deviceIdNow, [
+            'is_on'      => (int)$s['is_on'],
+            'brightness' => (int)$s['brightness'],
+            'color_r'    => (int)$s['color_r'],
+            'color_g'    => (int)$s['color_g'],
+            'color_b'    => (int)$s['color_b'],
+        ], 'schedule');
+
+        if ((int)$s['is_on'] === 1 && !$device['is_on']) {
+            record_energy_turn_on($deviceIdNow);
+        }
+
+        log_activity($deviceIdNow, 'schedule', 'schedule_run', $s['label']);
+        $ran++;
+    }
+
+    return $ran;
 }
 
 /**
@@ -133,6 +392,10 @@ function get_devices(): array
         $d['actual_g'] = (int)($d['actual_g'] ?? 214);
         $d['actual_b'] = (int)($d['actual_b'] ?? 175);
 
+        // Operating mode: who owns the relay right now.
+        $d['op_mode'] = in_array($d['op_mode'] ?? 'auto', ['auto', 'manual', 'schedule'], true)
+            ? ($d['op_mode'] ?? 'auto') : 'auto';
+
         // in_sync = the hardware has caught up with the command.
         $d['in_sync'] = ($d['actual_on'] === $d['is_on']
                          && $d['actual_brightness'] === $d['brightness']);
@@ -162,56 +425,6 @@ function get_device_by_key(string $key): ?array
     $stmt->execute([$key]);
     $row = $stmt->fetch();
     return $row ?: null;
-}
-
-/**
- * Update the desired state in the DB and queue a command for the device.
- */
-function apply_light_state(int $deviceId, array $target, string $source = 'web'): void
-{
-    ensure_state_row($deviceId);
-
-    $fields = [];
-    $params = [];
-    foreach (['is_on', 'brightness', 'color_r', 'color_g', 'color_b', 'mode'] as $k) {
-        if (array_key_exists($k, $target)) {
-            $fields[] = "`$k` = ?";
-            $params[] = $target[$k];
-        }
-    }
-    if ($fields) {
-        $params[] = $deviceId;
-        $sql = 'UPDATE light_state SET ' . implode(', ', $fields) . ' WHERE device_id = ?';
-        db()->prepare($sql)->execute($params);
-    }
-
-    // Push the merged target to the device.
-    $device = get_device($deviceId);
-    if ($device) {
-        // Only the LATEST target matters. Drop any not-yet-delivered
-        // set_state commands first, so a burst of clicks cannot build up a
-        // backlog that replays stale states on the device.
-        db()->prepare(
-            "DELETE FROM commands
-              WHERE device_id = ? AND command = 'set_state' AND status = 'pending'"
-        )->execute([$deviceId]);
-
-        $payload = [
-            'is_on'      => $device['is_on'],
-            'brightness' => $device['brightness'],
-            'color'      => [$device['color_r'], $device['color_g'], $device['color_b']],
-            'mode'       => $device['mode'],
-        ];
-        queue_command($deviceId, 'set_state', $payload);
-    }
-
-    $desc = [];
-    foreach (['is_on', 'brightness', 'mode'] as $k) {
-        if (array_key_exists($k, $target)) {
-            $desc[] = "$k=" . (is_bool($target[$k]) ? (int)$target[$k] : $target[$k]);
-        }
-    }
-    log_activity($deviceId, $source, 'state_change', implode(' ', $desc));
 }
 
 /**
@@ -333,6 +546,39 @@ function render_footer(): void
 <script>
 window.APP_BASE   = <?= json_encode(base_url()) ?>;
 window.CSRF_TOKEN = <?= json_encode(csrf_token()) ?>;
+</script>
+<script>
+(function () {
+  'use strict';
+  var clockEl = document.getElementById('liveClock');
+  var dateEl  = document.getElementById('liveDate');
+  if (!clockEl || !dateEl) return;
+
+  var timeOptions = {
+    timeZone: 'Asia/Manila',
+    hour12: true,
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit'
+  };
+  var dateOptions = {
+    timeZone: 'Asia/Manila',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  };
+
+  function updateClock() {
+    var now = new Date();
+    clockEl.textContent = now.toLocaleTimeString('en-PH', timeOptions);
+    clockEl.dateTime = now.toISOString();
+    dateEl.textContent = now.toLocaleDateString('en-PH', dateOptions);
+  }
+
+  updateClock();
+  setInterval(updateClock, 1000);
+})();
 </script>
 <script src="<?= url('assets/js/app.js') ?>" defer></script>
 </body>
